@@ -11,7 +11,7 @@ permissions:
   contents: read
 
 env:
-  ORGANIZATION: your-org
+  ORGANIZATION: test-org
 
 jobs:
   export-members:
