@@ -1,0 +1,226 @@
+name: Exportar usuarios de GitHub
+
+on:
+  workflow_dispatch:
+
+  schedule:
+    # Ejecutar todos los lunes a las 7:00 AM hora de México
+    - cron: "0 13 * * 1"
+
+permissions:
+  contents: read
+
+env:
+  ORGANIZATION: your-org
+
+jobs:
+  export-users:
+
+    runs-on: ubuntu-latest
+
+    steps:
+
+      # ==========================================================
+      # Configurar Python
+      # ==========================================================
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # Instalar las librerías necesarias para generar el Excel
+      - name: Instalar dependencias
+        run: pip install requests openpyxl
+
+      # ==========================================================
+      # Obtener usuarios y generar reporte
+      # ==========================================================
+      - name: Generar reporte de usuarios
+        env:
+          GH_TOKEN: ${{ secrets.ORG_REPORT_TOKEN }}
+        run: |
+
+          python <<'PY'
+
+          import csv
+          import os
+          import requests
+          from openpyxl import Workbook
+
+          org = os.environ["ORGANIZATION"]
+          token = os.environ["GH_TOKEN"]
+
+          headers = {
+              "Authorization": f"Bearer {token}",
+              "Accept": "application/vnd.github+json"
+          }
+
+          # ------------------------------------------------------
+          # Función para consultar GitHub
+          # ------------------------------------------------------
+          def get(url, params=None):
+              response = requests.get(
+                  url,
+                  headers=headers,
+                  params=params
+              )
+              response.raise_for_status()
+              return response.json()
+
+          # ------------------------------------------------------
+          # Obtener todos los usuarios de la organización
+          # GitHub devuelve máximo 100 usuarios por página.
+          # ------------------------------------------------------
+          users = []
+          page = 1
+
+          while True:
+
+              data = get(
+                  f"https://api.github.com/orgs/{org}/members",
+                  {
+                      "per_page": 100,
+                      "page": page
+                  }
+              )
+
+              if not data:
+                  break
+
+              users.extend(data)
+              page += 1
+
+          print(f"Usuarios encontrados: {len(users)}")
+
+          # ------------------------------------------------------
+          # Columnas del reporte
+          # ------------------------------------------------------
+          columns = [
+              "login",
+              "name",
+              "tfa_enabled",
+              "tfa_level",
+              "tfa_required_by",
+              "is_public",
+              "role",
+              "saml_name_id",
+              "organization_roles_count"
+          ]
+
+          rows = []
+
+          # ------------------------------------------------------
+          # Obtener información de cada usuario
+          # ------------------------------------------------------
+          for user in users:
+
+              login = user["login"]
+
+              print(f"Procesando: {login}")
+
+              # Información básica del usuario
+              profile = get(
+                  f"https://api.github.com/users/{login}"
+              )
+
+              # Información de membresía en la organización
+              membership = get(
+                  f"https://api.github.com/orgs/{org}/memberships/{login}"
+              )
+
+              # Verificar si la membresía es pública
+              public_orgs = get(
+                  f"https://api.github.com/users/{login}/orgs"
+              )
+
+              is_public = any(
+                  item["login"] == org
+                  for item in public_orgs
+              )
+
+              rows.append([
+                  login,
+                  profile.get("name") or "",
+                  "",       # tfa_enabled
+                  "",       # tfa_level
+                  "",       # tfa_required_by
+                  is_public,
+                  membership.get("role", ""),
+                  "",       # saml_name_id
+                  0         # organization_roles_count
+              ])
+
+          # ======================================================
+          # Crear CSV
+          # ======================================================
+
+          csv_file = "github-members-report.csv"
+
+          with open(
+              csv_file,
+              "w",
+              newline="",
+              encoding="utf-8"
+          ) as file:
+
+              writer = csv.writer(file)
+              writer.writerow(columns)
+              writer.writerows(rows)
+
+          # ======================================================
+          # Crear Excel
+          # ======================================================
+
+          xlsx_file = "github-members-report.xlsx"
+
+          workbook = Workbook()
+          sheet = workbook.active
+          sheet.title = "Usuarios"
+
+          # Encabezados
+          sheet.append(columns)
+
+          # Datos
+          for row in rows:
+              sheet.append(row)
+
+          # Mantener encabezados visibles al desplazarse
+          sheet.freeze_panes = "A2"
+
+          # Activar filtros
+          sheet.auto_filter.ref = sheet.dimensions
+
+          # Ajustar automáticamente el ancho de las columnas
+          for column in sheet.columns:
+
+              width = max(
+                  len(str(cell.value or ""))
+                  for cell in column
+              )
+
+              sheet.column_dimensions[
+                  column[0].column_letter
+              ].width = min(width + 2, 40)
+
+          workbook.save(xlsx_file)
+
+          print("========================================")
+          print("Reporte generado correctamente")
+          print(f"Organización: {org}")
+          print(f"Usuarios: {len(rows)}")
+          print(f"Excel: {xlsx_file}")
+          print(f"CSV: {csv_file}")
+          print("========================================")
+
+          PY
+
+      # ==========================================================
+      # Guardar los reportes como artifacts
+      # ==========================================================
+      - name: Guardar reportes
+        uses: actions/upload-artifact@v4
+        with:
+          name: github-members-report
+          path: |
+            github-members-report.xlsx
+            github-members-report.csv
