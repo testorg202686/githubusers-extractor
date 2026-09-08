@@ -1,4 +1,3 @@
-```yaml
 name: Exportar miembros de GitHub
 
 on:
@@ -419,4 +418,3 @@ jobs:
       #       GitHub Actions
       #
       #     attachments: github-members-report.xlsx
-```
