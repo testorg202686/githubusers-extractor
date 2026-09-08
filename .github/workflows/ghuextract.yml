@@ -1,11 +1,12 @@
+```yaml
 name: Exportar miembros de GitHub
 
 on:
   workflow_dispatch:
 
   schedule:
-    # Cada lunes a las 7:00 AM hora de México
-    - cron: "0 13 * * 1"
+    # Ejecutar diariamente a las 7:00 AM hora de México
+    - cron: "0 13 * * *"
 
 permissions:
   contents: read
@@ -19,7 +20,9 @@ jobs:
 
     steps:
 
-      # Instalar Python y las librerías necesarias
+      # ----------------------------------------------------------
+      # Configurar Python
+      # ----------------------------------------------------------
       - name: Configurar Python
         uses: actions/setup-python@v5
         with:
@@ -28,13 +31,13 @@ jobs:
       - name: Instalar dependencias
         run: pip install requests openpyxl
 
-      # Obtener la información de GitHub y generar el Excel
+      # ----------------------------------------------------------
+      # Obtener información de GitHub y generar reportes
+      # ----------------------------------------------------------
       - name: Generar reporte
         env:
           GH_TOKEN: ${{ secrets.ORG_REPORT_TOKEN }}
-          ORGANIZATION: ${{ env.ORGANIZATION }}
         run: |
-
           python <<'PY'
 
           import csv
@@ -42,110 +45,192 @@ jobs:
           import requests
           from openpyxl import Workbook
 
+
+          # ==========================================================
+          # Configuración
+          # ==========================================================
+
           ORG = os.environ["ORGANIZATION"]
           TOKEN = os.environ["GH_TOKEN"]
 
-          REST = "https://api.github.com"
+          API = "https://api.github.com"
 
-          headers = {
+          HEADERS = {
               "Authorization": f"Bearer {TOKEN}",
               "Accept": "application/vnd.github+json",
               "X-GitHub-Api-Version": "2022-11-28"
           }
 
 
-          # ------------------------------------------------------
-          # Consulta REST a GitHub
-          # ------------------------------------------------------
-          def rest(url, params=None):
+          # ==========================================================
+          # Funciones
+          # ==========================================================
 
+          def get(url, params=None):
+              """Realiza una consulta a la API de GitHub."""
               response = requests.get(
                   url,
-                  headers=headers,
+                  headers=HEADERS,
                   params=params
               )
-
               response.raise_for_status()
-
               return response.json()
 
 
-          # ------------------------------------------------------
-          # Obtener todos los resultados de una API paginada
-          # ------------------------------------------------------
-          def all_pages(url, params=None):
-
+          def get_all(url, params=None):
+              """Obtiene todos los resultados manejando paginación."""
               params = params or {}
               params["per_page"] = 100
 
-              result = []
+              results = []
               page = 1
 
               while True:
-
                   params["page"] = page
-
-                  data = rest(url, params)
+                  data = get(url, params)
 
                   if not data:
                       break
 
-                  result.extend(data)
+                  results.extend(data)
                   page += 1
 
-              return result
+              return results
 
 
-          # ------------------------------------------------------
+          # ==========================================================
           # Obtener miembros
-          # ------------------------------------------------------
-          print(f"Obteniendo miembros de {ORG}...")
+          # ==========================================================
 
-          members = all_pages(
-              f"{REST}/orgs/{ORG}/members"
+          print(f"Obteniendo miembros de: {ORG}")
+
+          members = get_all(
+              f"{API}/orgs/{ORG}/members"
           )
 
           print(f"Miembros encontrados: {len(members)}")
 
 
-          # ------------------------------------------------------
-          # Obtener miembros con 2FA deshabilitado
-          # ------------------------------------------------------
+          # ==========================================================
+          # Obtener información de 2FA
+          # ==========================================================
+
           tfa_disabled = {
               user["login"]
-              for user in all_pages(
-                  f"{REST}/orgs/{ORG}/members",
+              for user in get_all(
+                  f"{API}/orgs/{ORG}/members",
                   {"filter": "2fa_disabled"}
               )
           }
 
-
-          # ------------------------------------------------------
-          # Obtener miembros con 2FA inseguro
-          # ------------------------------------------------------
           tfa_insecure = {
               user["login"]
-              for user in all_pages(
-                  f"{REST}/orgs/{ORG}/members",
+              for user in get_all(
+                  f"{API}/orgs/{ORG}/members",
                   {"filter": "2fa_insecure"}
               )
           }
 
 
-          # ------------------------------------------------------
+          # ==========================================================
           # Obtener miembros públicos
-          # ------------------------------------------------------
+          # ==========================================================
+
           public_members = {
               user["login"]
-              for user in all_pages(
-                  f"{REST}/orgs/{ORG}/public_members"
+              for user in get_all(
+                  f"{API}/orgs/{ORG}/public_members"
               )
           }
 
 
-          # ------------------------------------------------------
-          # Columnas del reporte de GitHub
-          # ------------------------------------------------------
+          # ==========================================================
+          # Obtener identidades SAML
+          # ==========================================================
+
+          query = """
+          query($org: String!, $cursor: String) {
+            organization(login: $org) {
+              samlIdentityProvider {
+                externalIdentities(
+                  first: 100
+                  after: $cursor
+                  membersOnly: true
+                ) {
+                  pageInfo {
+                    hasNextPage
+                    endCursor
+                  }
+                  nodes {
+                    samlIdentity {
+                      nameId
+                    }
+                    user {
+                      login
+                    }
+                  }
+                }
+              }
+            }
+          }
+          """
+
+          saml_users = {}
+          cursor = None
+
+          while True:
+
+              response = requests.post(
+                  f"{API}/graphql",
+                  headers=HEADERS,
+                  json={
+                      "query": query,
+                      "variables": {
+                          "org": ORG,
+                          "cursor": cursor
+                      }
+                  }
+              )
+
+              response.raise_for_status()
+
+              data = response.json()
+
+              if "errors" in data:
+                  print("No se pudo obtener información SAML.")
+                  break
+
+              identities = (
+                  data["data"]["organization"]
+                  .get("samlIdentityProvider")
+              )
+
+              if not identities:
+                  break
+
+              for identity in identities["nodes"]:
+
+                  user = identity.get("user")
+                  saml = identity.get("samlIdentity")
+
+                  if user and saml:
+                      saml_users[user["login"]] = (
+                          saml.get("nameId", "")
+                      )
+
+              if not identities["pageInfo"]["hasNextPage"]:
+                  break
+
+              cursor = identities["pageInfo"]["endCursor"]
+
+
+          print(f"Identidades SAML: {len(saml_users)}")
+
+
+          # ==========================================================
+          # Columnas del reporte
+          # ==========================================================
+
           columns = [
               "login",
               "name",
@@ -159,53 +244,49 @@ jobs:
           ]
 
 
+          # ==========================================================
+          # Construir reporte
+          # ==========================================================
+
           rows = []
 
-
-          # ------------------------------------------------------
-          # Procesar usuarios
-          # ------------------------------------------------------
           for member in members:
 
               login = member["login"]
 
-              print(f"Procesando {login}...")
+              print(f"Procesando: {login}")
 
+              user = get(
+                  f"{API}/users/{login}"
+              )
 
-              # Información del usuario
-              user = rest(
-                  f"{REST}/users/{login}"
+              membership = get(
+                  f"{API}/orgs/{ORG}/memberships/{login}"
               )
 
 
-              # Información de la membresía
-              membership = rest(
-                  f"{REST}/orgs/{ORG}/memberships/{login}"
-              )
-
-
-              # --------------------------------------------------
-              # Determinar estado de 2FA
-              # --------------------------------------------------
+              # Estado de 2FA
               if login in tfa_disabled:
-
                   tfa_enabled = "false"
                   tfa_level = "disabled"
 
               elif login in tfa_insecure:
-
                   tfa_enabled = "true"
                   tfa_level = "insecure"
 
               else:
-
                   tfa_enabled = "true"
                   tfa_level = "secure"
 
 
-              # --------------------------------------------------
-              # Crear registro
-              # --------------------------------------------------
+              # Rol dentro de la organización
+              role = (
+                  "Owner"
+                  if membership.get("role") == "admin"
+                  else "Member"
+              )
+
+
               rows.append([
                   login,
                   user.get("name") or "",
@@ -213,15 +294,15 @@ jobs:
                   tfa_level,
                   "",
                   "true" if login in public_members else "false",
-                  "Owner" if membership.get("role") == "admin" else "Member",
-                  "",
-                  0
+                  role,
+                  saml_users.get(login, ""),
+                  ""
               ])
 
 
-          # ======================================================
-          # Crear CSV
-          # ======================================================
+          # ==========================================================
+          # Generar CSV
+          # ==========================================================
 
           csv_file = "github-members-report.csv"
 
@@ -233,19 +314,17 @@ jobs:
           ) as file:
 
               writer = csv.writer(file)
-
               writer.writerow(columns)
               writer.writerows(rows)
 
 
-          # ======================================================
-          # Crear Excel
-          # ======================================================
+          # ==========================================================
+          # Generar Excel
+          # ==========================================================
 
           xlsx_file = "github-members-report.xlsx"
 
           workbook = Workbook()
-
           sheet = workbook.active
           sheet.title = "Members"
 
@@ -254,13 +333,11 @@ jobs:
           for row in rows:
               sheet.append(row)
 
-          # Mantener encabezados visibles
+          # Congelar encabezados y habilitar filtros
           sheet.freeze_panes = "A2"
-
-          # Agregar filtros
           sheet.auto_filter.ref = sheet.dimensions
 
-          # Ajustar ancho de columnas
+          # Ajustar automáticamente el ancho de las columnas
           for column in sheet.columns:
 
               width = max(
@@ -275,24 +352,71 @@ jobs:
           workbook.save(xlsx_file)
 
 
-          print()
-          print("========================================")
-          print("REPORTE GENERADO")
-          print("========================================")
+          # ==========================================================
+          # Resumen
+          # ==========================================================
+
+          print("")
+          print("==========================================")
+          print("REPORTE GENERADO CORRECTAMENTE")
+          print("==========================================")
           print(f"Organización : {ORG}")
           print(f"Usuarios     : {len(rows)}")
-          print(f"Excel        : {xlsx_file}")
           print(f"CSV          : {csv_file}")
-          print("========================================")
+          print(f"Excel        : {xlsx_file}")
+          print("==========================================")
+
 
           PY
 
 
-      # Guardar los archivos como artifacts
+      # ----------------------------------------------------------
+      # Guardar reportes como artifacts
+      # ----------------------------------------------------------
       - name: Guardar reportes
         uses: actions/upload-artifact@v4
         with:
           name: github-members-report
           path: |
-            github-members-report.xlsx
             github-members-report.csv
+            github-members-report.xlsx
+
+
+      # ----------------------------------------------------------
+      # Enviar reporte por correo
+      #
+      # Deshabilitado temporalmente.
+      # ----------------------------------------------------------
+      #
+      # - name: Enviar reporte por correo
+      #   uses: dawidd6/action-send-mail@v6
+      #   with:
+      #     server_address: ${{ secrets.SMTP_SERVER }}
+      #     server_port: ${{ secrets.SMTP_PORT }}
+      #     username: ${{ secrets.SMTP_USERNAME }}
+      #     password: ${{ secrets.SMTP_PASSWORD }}
+      #
+      #     from: GitHub Actions <${{ secrets.SMTP_USERNAME }}>
+      #
+      #     to: |
+      #       usuario1@empresa.com,
+      #       usuario2@empresa.com
+      #
+      #     subject: Reporte de miembros GitHub - ${{ env.ORGANIZATION }}
+      #
+      #     body: |
+      #       Hola,
+      #
+      #       Se generó el reporte diario de miembros
+      #       de GitHub.
+      #
+      #       Organización:
+      #       ${{ env.ORGANIZATION }}
+      #
+      #       El archivo Excel se encuentra adjunto.
+      #
+      #       Saludos,
+      #       GitHub Actions
+      #
+      #     attachments: github-members-report.xlsx
+```
