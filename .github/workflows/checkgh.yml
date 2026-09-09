@@ -1,0 +1,32 @@
+name: Check Ubuntu Tools
+
+on:
+  workflow_dispatch:
+
+jobs:
+  check-tools:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check installed tools
+        run: |
+          echo "=== OS ==="
+          lsb_release -a
+
+          echo ""
+          echo "=== Tools ==="
+
+          echo "jq:"
+          jq --version
+
+          echo "gh:"
+          gh --version
+
+          echo "git:"
+          git --version
+
+          echo "curl:"
+          curl --version | head -n 1
+
+          echo "bash:"
+          bash --version | head -n 1
