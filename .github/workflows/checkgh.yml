@@ -1,32 +1,20 @@
-name: Check Ubuntu Tools
+name: Check Dependencies
 
 on:
   workflow_dispatch:
 
 jobs:
-  check-tools:
+  check:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Check installed tools
+      - name: Check jq and gh
         run: |
-          echo "=== OS ==="
-          lsb_release -a
-
-          echo ""
-          echo "=== Tools ==="
-
           echo "jq:"
+          command -v jq
           jq --version
 
+          echo ""
           echo "gh:"
+          command -v gh
           gh --version
-
-          echo "git:"
-          git --version
-
-          echo "curl:"
-          curl --version | head -n 1
-
-          echo "bash:"
-          bash --version | head -n 1
